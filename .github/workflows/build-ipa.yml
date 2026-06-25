@@ -1,0 +1,95 @@
+name: Build RheumPie IPA
+
+# Builds an UNSIGNED .ipa on a macOS runner (Xcode preinstalled — no Xcode.xip,
+# no Apple login). Download the artifact and sideload with Sideloadly, which
+# signs it with your Apple ID at install time.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.5'
+
+      - name: Show toolchain
+        run: |
+          ls /Applications | grep -i Xcode
+          swift --version
+          xcodebuild -version
+          xcrun -sdk iphoneos --show-sdk-path
+
+      - name: Install xtool
+        run: brew install xtool-org/tap/xtool
+
+      - name: Generate Xcode project
+        run: |
+          xtool dev generate-xcode-project
+          ls -la
+
+      - name: Build unsigned .app
+        run: |
+          set -x
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
+          echo "Project: $PROJ"
+          if [ -z "$PROJ" ]; then echo "No .xcodeproj found"; exit 1; fi
+          xcodebuild -project "$PROJ" -list
+          SCHEMES=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f && NF{gsub(/^[[:space:]]+/,"");print}')
+          echo "Available schemes:"; echo "$SCHEMES"
+          SCHEME=$(echo "$SCHEMES" | grep -iE -- '-App$|App$' | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
+          echo "Scheme: $SCHEME"
+          xcodebuild \
+            -project "$PROJ" -scheme "$SCHEME" \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            SWIFT_VERSION=5.0 \
+            build
+
+      - name: Run unit tests
+        run: |
+          set -x
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
+          TEST_SCHEME=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f && NF{gsub(/^[[:space:]]+/,"");print}' | grep -i 'Tests' | head -1)
+          if [ -n "$TEST_SCHEME" ]; then
+            xcodebuild test \
+              -project "$PROJ" -scheme "$TEST_SCHEME" \
+              -destination "platform=iOS Simulator,name=iPhone 16,OS=latest" \
+              SWIFT_VERSION=5.0 \
+              2>&1 | tail -40
+          else
+            echo "No test scheme found — skipping"
+          fi
+
+      - name: Package IPA
+        run: |
+          set -x
+          APP=$(find build -path "*-iphoneos/*.app" -type d | head -1)
+          echo "App: $APP"
+          [ -n "$APP" ] || { echo "No .app produced"; exit 1; }
+          # xtool's generate-xcode-project ignores iconPath; place the icons ourselves.
+          sips -z 120 120 icon_1024.png --out "$APP/AppIcon60x60@2x.png"
+          sips -z 180 180 icon_1024.png --out "$APP/AppIcon60x60@3x.png"
+          sips -z 152 152 icon_1024.png --out "$APP/AppIcon76x76@2x~ipad.png"
+          cp PrivacyInfo.xcprivacy "$APP/PrivacyInfo.xcprivacy"
+          plutil -p "$APP/Info.plist" | grep -i -A4 icon || true
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry RheumPie.ipa Payload
+          ls -la RheumPie.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RheumPie-unsigned-ipa
+          path: RheumPie.ipa
+          if-no-files-found: error

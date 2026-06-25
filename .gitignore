@@ -1,0 +1,27 @@
+# Xcode + SwiftPM
+.build/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+*.ipa
+Payload/
+build/
+
+# xtool generated
+xtool/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Secrets — never commit
+Secrets.swift
+*.env
+secrets/
+
+# IDE
+.vscode/
+*.swp

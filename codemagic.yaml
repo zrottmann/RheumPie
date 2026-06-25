@@ -1,0 +1,129 @@
+# Codemagic CI/CD — RheumPie (xtool SwiftUI)
+#
+# Two workflows:
+#   ios-unsigned   Builds an UNSIGNED .ipa that works NOW (no Apple account
+#                  needed). Sideload it with Sideloadly, which signs it with
+#                  your Apple ID at install time.
+#   ios-appstore   SIGNED App Store + TestFlight path. SCAFFOLD ONLY — see the
+#                  header on that workflow; needs an App Store Connect API key
+#                  added as a Codemagic integration and an ASC app record created
+#                  (bundle id com.zrottmann.rheumpie) before it can run.
+
+workflows:
+  ios-unsigned:
+    name: RheumPie Unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    cache:
+      cache_paths:
+        - ~/Library/Caches/org.swift.swiftpm
+        - ~/Library/org.swift.swiftpm
+        - ~/Library/Developer/Xcode/DerivedData
+        - ~/Library/Caches/Homebrew
+        - $HOME/.cache/xtool
+        - .build
+    environment:
+      xcode: 26.5
+    scripts:
+      - name: Show toolchain
+        script: |
+          xcodebuild -version
+          swift --version
+          xcrun -sdk iphoneos --show-sdk-path
+      - name: Install xtool
+        script: brew install xtool-org/tap/xtool
+      - name: Generate Xcode project
+        script: |
+          xtool dev generate-xcode-project
+          ls -la
+      - name: Build unsigned .app
+        script: |
+          set -x
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
+          echo "Project: $PROJ"
+          [ -n "$PROJ" ] || { echo "No .xcodeproj found"; exit 1; }
+          xcodebuild -project "$PROJ" -list
+          SCHEMES=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f && NF{gsub(/^[[:space:]]+/,"");print}')
+          echo "Available schemes:"; echo "$SCHEMES"
+          SCHEME=$(echo "$SCHEMES" | grep -iE -- '-App$|App$' | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
+          echo "Scheme: $SCHEME"
+          xcodebuild \
+            -project "$PROJ" -scheme "$SCHEME" \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            SWIFT_VERSION=5.0 \
+            build
+      - name: Package IPA
+        script: |
+          set -x
+          APP=$(find build -path "*-iphoneos/*.app" -type d | head -1)
+          echo "App: $APP"
+          [ -n "$APP" ] || { echo "No .app produced"; exit 1; }
+          sips -z 120 120 icon_1024.png --out "$APP/AppIcon60x60@2x.png"
+          sips -z 180 180 icon_1024.png --out "$APP/AppIcon60x60@3x.png"
+          sips -z 152 152 icon_1024.png --out "$APP/AppIcon76x76@2x~ipad.png"
+          cp PrivacyInfo.xcprivacy "$APP/PrivacyInfo.xcprivacy"
+          plutil -p "$APP/Info.plist" | grep -i -A4 icon || true
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry RheumPie.ipa Payload
+          ls -la RheumPie.ipa
+    artifacts:
+      - RheumPie.ipa
+      - build/**/*.app
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SIGNED App Store + TestFlight. SCAFFOLD — requires before it can run:
+  #   1. Create ASC app record for com.zrottmann.rheumpie in App Store Connect UI.
+  #   2. Add the ASC API key (Key 9Q8C2WV933) as a Codemagic integration.
+  # Until both are done this workflow fails at the signing step — expected.
+  # ─────────────────────────────────────────────────────────────────────────────
+  ios-appstore:
+    name: RheumPie App Store + TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    cache:
+      cache_paths:
+        - ~/Library/Caches/org.swift.swiftpm
+        - ~/Library/org.swift.swiftpm
+        - ~/Library/Developer/Xcode/DerivedData
+        - ~/Library/Caches/Homebrew
+        - $HOME/.cache/xtool
+        - .build
+    integrations:
+      app_store_connect: app_store_connect
+    environment:
+      xcode: 26.5
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.zrottmann.rheumpie
+      vars:
+        BUNDLE_ID: com.zrottmann.rheumpie
+    scripts:
+      - name: Install xtool
+        script: brew install xtool-org/tap/xtool
+      - name: Generate Xcode project
+        script: |
+          xtool dev generate-xcode-project
+          ls -la
+      - name: Set up code signing
+        script: xcode-project use-profiles
+      - name: Build signed archive
+        script: |
+          set -euxo pipefail
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
+          [ -n "$PROJ" ] || { echo "no xcodeproj"; exit 1; }
+          SCHEMES=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f && NF{gsub(/^[[:space:]]+/,"");print}')
+          SCHEME=$(echo "$SCHEMES" | grep -iE -- '-App$|App$' | grep -iv 'Tests' | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -iv 'Tests' | head -1)
+          echo "Project: $PROJ / Scheme: $SCHEME"
+          xcode-project build-ipa --project "$PROJ" --scheme "$SCHEME" --config Release
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
