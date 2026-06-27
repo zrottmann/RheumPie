@@ -5,6 +5,12 @@ import XCTest
 @MainActor
 final class ArticleStoreTests: XCTestCase {
 
+    override func tearDown() {
+        super.tearDown()
+        // Prevent persisted user posts from leaking between tests.
+        UserDefaults.standard.removeObject(forKey: "com.zrottmann.rheumpie.userPosts")
+    }
+
     // MARK: - Seed loading
 
     func testLoadPopulatesArticles() async throws {
@@ -96,6 +102,82 @@ final class ArticleStoreTests: XCTestCase {
         let words = Array(repeating: "word", count: 400).joined(separator: " ")
         let article = makeArticle(body: words)
         XCTAssertEqual(article.estimatedReadMinutes, 2)
+    }
+
+    // MARK: - User post authoring
+
+    func testCreatePostAppearsFirst() {
+        let store = makeStoreWithStubArticles()
+        store.createPost(
+            title: "My First Post",
+            category: .ra,
+            summary: "A summary.",
+            body: "Body content here.",
+            byline: "Dr. Test"
+        )
+        XCTAssertEqual(store.articles.first?.title, "My First Post")
+        XCTAssertTrue(store.articles.first?.isUserAuthored == true)
+    }
+
+    func testCreatePostIncrementsCount() {
+        let store = makeStoreWithStubArticles()
+        let before = store.articles.count
+        store.createPost(title: "Post", category: .general, summary: "S", body: "Body text.", byline: "Dr.")
+        XCTAssertEqual(store.articles.count, before + 1)
+    }
+
+    func testUpdatePostChangesTitle() {
+        let store = makeStoreWithStubArticles()
+        store.createPost(title: "Original", category: .general, summary: "S", body: "Body.", byline: "Dr.")
+        guard let created = store.articles.first(where: { $0.isUserAuthored }) else {
+            return XCTFail("No user post found after createPost")
+        }
+        let updated = Article(
+            id: created.id,
+            title: "Updated Title",
+            byline: created.byline,
+            publishDate: created.publishDate,
+            category: created.category,
+            summary: created.summary,
+            body: created.body,
+            isUserAuthored: true
+        )
+        store.updatePost(updated)
+        XCTAssertEqual(store.articles.first(where: { $0.id == created.id })?.title, "Updated Title")
+    }
+
+    func testDeletePostRemovesIt() {
+        let store = makeStoreWithStubArticles()
+        store.createPost(title: "To Delete", category: .general, summary: "S", body: "Body.", byline: "Dr.")
+        let before = store.articles.count
+        guard let post = store.articles.first(where: { $0.isUserAuthored }) else {
+            return XCTFail("No user post found after createPost")
+        }
+        store.deletePost(post)
+        XCTAssertFalse(store.articles.contains(where: { $0.id == post.id }))
+        XCTAssertEqual(store.articles.count, before - 1)
+    }
+
+    func testDeletePostAlsoRemovesBookmark() {
+        let store = makeStoreWithStubArticles()
+        store.createPost(title: "Bookmarked Post", category: .ra, summary: "S", body: "Body.", byline: "Dr.")
+        guard let post = store.articles.first(where: { $0.isUserAuthored }) else {
+            return XCTFail("No user post found after createPost")
+        }
+        store.toggleBookmark(post)
+        XCTAssertTrue(store.isBookmarked(post))
+        store.deletePost(post)
+        XCTAssertFalse(store.isBookmarked(post))
+    }
+
+    func testCannotDeleteSeedArticle() {
+        let store = makeStoreWithStubArticles()
+        guard let seed = store.articles.first(where: { !$0.isUserAuthored }) else {
+            return XCTFail("No seed article to test with")
+        }
+        let before = store.articles.count
+        store.deletePost(seed)  // guard in deletePost: !isUserAuthored → no-op
+        XCTAssertEqual(store.articles.count, before)
     }
 
     // MARK: - Helpers
