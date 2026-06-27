@@ -22,6 +22,9 @@ struct BookmarksView: View {
                             ArticleRowView(article: article, isBookmarked: true)
                         }
                         .buttonStyle(.plain)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
                                 store.toggleBookmark(article)
@@ -31,6 +34,8 @@ struct BookmarksView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .background(Color(.systemGroupedBackground))
+                    .scrollContentBackground(.hidden)
                 }
             }
             .navigationTitle("Bookmarks")

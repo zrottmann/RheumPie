@@ -14,34 +14,42 @@ struct ReaderView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Spacing.medium) {
-                    // Category + meta row
+                VStack(alignment: .leading, spacing: 0) {
+                    // Category badge + read-time header
                     HStack {
-                        Label(article.category.rawValue, systemImage: article.category.systemImage)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(Color.accentColor)
+                        CategoryBadge(category: article.category)
                         Spacer()
-                        Label("\(article.estimatedReadMinutes) min", systemImage: "clock")
+                        Label("\(article.estimatedReadMinutes) min read", systemImage: "clock")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    .padding(.bottom, Theme.Spacing.medium)
 
                     // Title
                     Text(article.title)
                         .font(.largeTitle.weight(.bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, Theme.Spacing.small)
 
                     // Byline + date
-                    HStack {
+                    HStack(spacing: Theme.Spacing.small) {
+                        Image(systemName: "person.circle.fill")
+                            .foregroundStyle(article.category.color)
                         Text(article.byline)
-                            .font(.subheadline)
+                            .font(.subheadline.weight(.medium))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text(article.publishDate, style: .date)
                             .font(.subheadline)
                             .foregroundStyle(.tertiary)
                     }
+                    .padding(.bottom, Theme.Spacing.medium)
 
-                    Divider()
+                    // Thin colored rule — editorial divider
+                    Rectangle()
+                        .fill(article.category.color)
+                        .frame(height: 2)
+                        .padding(.bottom, Theme.Spacing.large)
 
                     // Body paragraphs — split on double newline
                     let paragraphs = article.body
@@ -52,14 +60,18 @@ struct ReaderView: View {
                     ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, para in
                         Text(para)
                             .font(.body)
-                            .lineSpacing(6)
+                            .lineSpacing(7)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, Theme.Spacing.medium)
                     }
 
-                    // Disclaimer
-                    DisclaimerView()
+                    // Disclaimer callout
+                    DisclaimerView(category: article.category)
                         .padding(.top, Theme.Spacing.small)
+                        .padding(.bottom, Theme.Spacing.large)
                 }
-                .padding(Theme.Spacing.medium)
+                .padding(.horizontal, Theme.Spacing.medium)
+                .padding(.top, Theme.Spacing.medium)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -116,19 +128,32 @@ private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-// MARK: - Disclaimer
+// MARK: - Disclaimer callout
 
 private struct DisclaimerView: View {
+    let category: ArticleCategory
+
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-            Text("This article is for patient education only and is not a substitute for professional medical advice. Always talk to your rheumatologist before making any changes to your treatment.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 0) {
+            // Left accent bar in category color
+            Rectangle()
+                .fill(category.color)
+                .frame(width: 3)
+                .clipShape(Capsule())
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+                Label("Patient Education Only", systemImage: "info.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(category.color)
+
+                Text("This article is for patient education only and is not a substitute for professional medical advice. Always talk to your rheumatologist before making any changes to your treatment.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, Theme.Spacing.medium)
+            .padding(.vertical, Theme.Spacing.medium)
         }
-        .padding(Theme.Spacing.medium)
         .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

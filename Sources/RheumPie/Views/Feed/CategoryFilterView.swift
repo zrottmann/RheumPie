@@ -6,7 +6,7 @@ struct CategoryFilterView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.small) {
                 FilterChip(label: "All", isSelected: selectedCategory == nil) {
                     selectedCategory = nil
                 }
@@ -14,6 +14,7 @@ struct CategoryFilterView: View {
                     FilterChip(
                         label: cat.shortLabel,
                         systemImage: cat.systemImage,
+                        selectedColor: cat.color,
                         isSelected: selectedCategory == cat
                     ) {
                         selectedCategory = (selectedCategory == cat) ? nil : cat
@@ -29,24 +30,26 @@ struct CategoryFilterView: View {
 private struct FilterChip: View {
     let label: String
     var systemImage: String? = nil
+    var selectedColor: Color = .accentColor
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
+            HStack(spacing: Theme.Spacing.xsmall) {
                 if let img = systemImage {
                     Image(systemName: img)
-                        .imageScale(.small)
+                        .font(.caption)
                 }
                 Text(label)
                     .font(.subheadline.weight(isSelected ? .semibold : .regular))
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(isSelected ? Color.accentColor : Color(.systemGray5))
+            .padding(.vertical, 7)
+            .background(isSelected ? selectedColor : Color(.systemGray5))
             .foregroundStyle(isSelected ? Color.white : Color.primary)
             .clipShape(Capsule())
+            .animation(.easeInOut(duration: 0.15), value: isSelected)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])

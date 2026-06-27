@@ -1,44 +1,78 @@
 import SwiftUI
 
-/// Single row in the article feed list.
+/// Article card used in the feed and bookmarks list.
+///
+/// Layout: a thin category-color accent bar on top, then padded content
+/// (category badge, title, summary, footer). White card background with a
+/// subtle shadow pops against the grouped gray list background.
 struct ArticleRowView: View {
     let article: Article
     let isBookmarked: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label(article.category.shortLabel, systemImage: article.category.systemImage)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.accentColor)
-                Spacer()
-                if isBookmarked {
-                    Image(systemName: "bookmark.fill")
-                        .imageScale(.small)
-                        .foregroundStyle(Color.accentColor)
+        VStack(alignment: .leading, spacing: 0) {
+            // Colored accent bar — editorial identity marker
+            Rectangle()
+                .fill(article.category.color)
+                .frame(height: Theme.Card.accentBarHeight)
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.small) {
+                // Top row: category badge + status icons
+                HStack(alignment: .center, spacing: Theme.Spacing.xsmall) {
+                    CategoryBadge(category: article.category)
+                    Spacer()
+                    if article.isUserAuthored {
+                        Image(systemName: "pencil.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Your post")
+                    }
+                    if isBookmarked {
+                        Image(systemName: "bookmark.fill")
+                            .font(.caption)
+                            .foregroundStyle(article.category.color)
+                            .accessibilityLabel("Bookmarked")
+                    }
+                }
+
+                // Title
+                Text(article.title)
+                    .font(Theme.Font.articleTitle)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Summary
+                if !article.summary.isEmpty {
+                    Text(article.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Footer: date + read time
+                HStack {
+                    Text(article.publishDate, style: .date)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Label("\(article.estimatedReadMinutes) min read", systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
-
-            Text(article.title)
-                .font(.headline)
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-
-            Text(article.summary)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-
-            HStack {
-                Text(article.publishDate, style: .date)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Label("\(article.estimatedReadMinutes) min read", systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
+            .padding(.horizontal, Theme.Spacing.medium)
+            .padding(.top, Theme.Spacing.medium)
+            .padding(.bottom, Theme.Spacing.medium)
         }
-        .padding(.vertical, 4)
+        .background(.background)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Card.cornerRadius, style: .continuous))
+        .shadow(
+            color: .black.opacity(Theme.Card.shadowOpacity),
+            radius: Theme.Card.shadowRadius,
+            x: 0,
+            y: 2
+        )
     }
 }
