@@ -74,12 +74,20 @@ workflows:
       - RheumPie.ipa
       - build/**/*.app
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # SIGNED App Store + TestFlight. SCAFFOLD — requires before it can run:
-  #   1. Create ASC app record for com.zrottmann.rheumpie in App Store Connect UI.
-  #   2. Add the ASC API key (Key 9Q8C2WV933) as a Codemagic integration.
-  # Until both are done this workflow fails at the signing step — expected.
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # SIGNED App Store + TestFlight path. Ported verbatim from the proven
+  # Help2Others recipe (which itself came from aiMandarin/ElectricianForge).
+  #   group "appstore" provides:
+  #     CM_CERTIFICATE              base64 of a shared distribution .p12
+  #     CM_CERTIFICATE_PASSWORD     its password
+  #     APP_STORE_CONNECT_KEY_IDENTIFIER / _ISSUER_ID / _PRIVATE_KEY  (.p8 text)
+  # ONE shared distribution certificate is imported from CM_CERTIFICATE; then
+  # fetch-signing-files --create auto-generates THIS app's App Store profile.
+  # RheumPie has no Assets.xcassets in-repo (only icon_1024.png), so a minimal
+  # AppIcon asset catalog is synthesized in CI and compiled with actool to
+  # produce the Assets.car that App Store upload requires (errors 90022/3).
+  # Manual/API trigger only.
+  # ───────────────────────────────────────────────────────────────────────────
   ios-appstore:
     name: RheumPie App Store + TestFlight
     instance_type: mac_mini_m2
@@ -92,25 +100,84 @@ workflows:
         - ~/Library/Caches/Homebrew
         - $HOME/.cache/xtool
         - .build
-    integrations:
-      app_store_connect: app_store_connect
     environment:
       xcode: 26.5
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.zrottmann.rheumpie
+      groups:
+        - appstore   # CM_CERTIFICATE (.p12 b64) + CM_CERTIFICATE_PASSWORD +
+                     # APP_STORE_CONNECT_* (declarative ASC API key)
       vars:
         BUNDLE_ID: com.zrottmann.rheumpie
     scripts:
+      - name: Show toolchain
+        script: |
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun -sdk iphoneos --show-sdk-version)"
       - name: Install xtool
         script: brew install xtool-org/tap/xtool
       - name: Generate Xcode project
         script: |
           xtool dev generate-xcode-project
           ls -la
-      - name: Set up code signing
-        script: xcode-project use-profiles
-      - name: Build signed archive
+      - name: Fetch-or-create signing files
+        script: |
+          # ONE distribution certificate is shared across all builds/apps. It was
+          # created once (private key kept off-Apple) and stored as the secure
+          # Codemagic vars CM_CERTIFICATE (base64 .p12) + CM_CERTIFICATE_PASSWORD.
+          # Per-build cert *creation* is wrong — Apple caps distribution certs and
+          # a fresh key each run can't reuse them (409 "already have a current
+          # Distribution certificate"). Import the .p12, derive its private key,
+          # then fetch-or-create only the (reusable) App Store profile.
+          set -euo pipefail
+          keychain initialize
+          echo "$CM_CERTIFICATE" | base64 --decode > /tmp/dist.p12
+          keychain add-certificates \
+            --certificate /tmp/dist.p12 \
+            --certificate-password="$CM_CERTIFICATE_PASSWORD"
+          # Extract the cert's private key for fetch-signing-files matching.
+          # `openssl pkcs12 -nocerts -nodes` prepends "Bag Attributes / Key
+          # Attributes" preamble lines BEFORE -----BEGIN PRIVATE KEY-----; the
+          # codemagic-cli-tools --certificate-key validator rejects any value that
+          # does not start cleanly with the PEM armor, so strip everything before
+          # the first -----BEGIN line with sed.
+          openssl pkcs12 -in /tmp/dist.p12 -nocerts -nodes \
+            -passin pass:"$CM_CERTIFICATE_PASSWORD" \
+            | sed -n '/-----BEGIN/,/-----END/p' > /tmp/dist_cert_key.pem
+          head -1 /tmp/dist_cert_key.pem  # sanity: must be -----BEGIN ... KEY-----
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --strict-match-identifier \
+            --certificate-key=@file:/tmp/dist_cert_key.pem \
+            --create
+          xcode-project use-profiles
+      - name: Synthesize AppIcon asset catalog
+        script: |
+          # The repo ships only a loose icon_1024.png (no Assets.xcassets), but
+          # App Store upload requires a COMPILED asset catalog (Assets.car) that
+          # carries the 1024 marketing icon. Build a minimal AppIcon.appiconset
+          # here so the next step's actool has something to compile.
+          set -euxo pipefail
+          rm -rf Assets.xcassets
+          mkdir -p Assets.xcassets/AppIcon.appiconset
+          # iOS single-size universal 1024 icon (opaque RGB; alpha = blank icon).
+          sips -s format png -z 1024 1024 icon_1024.png --out Assets.xcassets/AppIcon.appiconset/icon_1024.png
+          cat > Assets.xcassets/AppIcon.appiconset/Contents.json <<'EOF'
+          {
+            "images" : [
+              {
+                "filename" : "icon_1024.png",
+                "idiom" : "universal",
+                "platform" : "ios",
+                "size" : "1024x1024"
+              }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          EOF
+          cat > Assets.xcassets/Contents.json <<'EOF'
+          { "info" : { "author" : "xcode", "version" : 1 } }
+          EOF
+          ls -la Assets.xcassets/AppIcon.appiconset
+      - name: Resolve project & scheme, archive, bake icons, export signed IPA
         script: |
           set -euxo pipefail
           PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
@@ -119,11 +186,139 @@ workflows:
           SCHEME=$(echo "$SCHEMES" | grep -iE -- '-App$|App$' | grep -iv 'Tests' | head -1)
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -iv 'Tests' | head -1)
           echo "Project: $PROJ / Scheme: $SCHEME"
-          xcode-project build-ipa --project "$PROJ" --scheme "$SCHEME" --config Release
+
+          # Archive first (signed). We deliberately do NOT use `xcode-project
+          # build-ipa` in one shot because xtool's generate-xcode-project ignores
+          # iconPath, so the .app ships with no 120/152 icon and App Store upload
+          # is rejected (errors 90022/90023). Inject icons into the archived .app,
+          # then re-sign on export so the icons are sealed in.
+          ARCHIVE="$PWD/build/app.xcarchive"
+          xcodebuild archive \
+            -project "$PROJ" -scheme "$SCHEME" -configuration Release \
+            -archivePath "$ARCHIVE" \
+            -destination 'generic/platform=iOS' \
+            SWIFT_VERSION=5.0 \
+            CODE_SIGN_STYLE=Manual
+
+          APPDIR=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" -type d | head -1)
+          [ -n "$APPDIR" ] || { echo "no .app in archive"; exit 1; }
+
+          # App Store upload (altool/Iris) rejects loose icon PNGs alone — it
+          # requires a COMPILED asset catalog (Assets.car) with an AppIcon set
+          # including the 1024 marketing icon (errors 90022/90023/91111). Compile
+          # the synthesized catalog with actool and merge into the archived .app.
+          rm -rf /tmp/ac && mkdir -p /tmp/ac
+          actool Assets.xcassets \
+            --compile /tmp/ac \
+            --platform iphoneos \
+            --minimum-deployment-target 17.0 \
+            --target-device iphone --target-device ipad \
+            --app-icon AppIcon \
+            --output-partial-info-plist /tmp/ac/partial.plist \
+            --output-format human-readable-text
+          cp -v /tmp/ac/Assets.car "$APPDIR/Assets.car"
+          find /tmp/ac -maxdepth 1 -name "*.png" -exec cp -v {} "$APPDIR/" \;
+          PB=/usr/libexec/PlistBuddy
+          for KEY in CFBundleIcons "CFBundleIcons~ipad" CFBundleIconName CFBundleIconFiles; do
+            $PB -c "Delete :$KEY" "$APPDIR/Info.plist" 2>/dev/null || true
+          done
+          plutil -convert xml1 /tmp/ac/partial.plist
+          $PB -c "Merge /tmp/ac/partial.plist" "$APPDIR/Info.plist"
+          echo "=== final Info.plist icon keys ==="
+          plutil -p "$APPDIR/Info.plist" | grep -iE "icon|appearance" || true
+
+          # Belt-and-suspenders: actool's thinning of a single universal icon has
+          # shipped an .app MISSING AppIcon60x60@3x.png (180), leaving the home
+          # screen BLANK on most iPhones. Bake the loose AppIcon60x60 PNGs from
+          # icon_1024.png (opaque RGB), read via CFBundleIcons:CFBundleIconFiles.
+          sips -z 120 120 icon_1024.png --out "$APPDIR/AppIcon60x60@2x.png"
+          sips -z 180 180 icon_1024.png --out "$APPDIR/AppIcon60x60@3x.png"
+          sips -z 152 152 icon_1024.png --out "$APPDIR/AppIcon76x76@2x~ipad.png"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" \
+            "$APPDIR/Info.plist" >/dev/null 2>&1 || \
+          /usr/libexec/PlistBuddy \
+            -c "Add :CFBundleIcons dict" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string AppIcon" \
+            "$APPDIR/Info.plist"
+          # HARD GATE: refuse to ship an .app missing the @3x iPhone icon.
+          [ -f "$APPDIR/AppIcon60x60@2x.png" ] && [ -f "$APPDIR/AppIcon60x60@3x.png" ] || {
+            echo "FATAL: AppIcon60x60@2x/@3x missing from bundle — blank home-screen icon"; exit 1; }
+          for I in "$APPDIR/AppIcon60x60@2x.png" "$APPDIR/AppIcon60x60@3x.png"; do
+            HASALPHA=$(sips -g hasAlpha "$I" 2>/dev/null | awk '/hasAlpha/{print $2}')
+            echo "$I hasAlpha=$HASALPHA"
+            [ "$HASALPHA" = "no" ] || { echo "FATAL: $I has an alpha channel — iOS will blank it"; exit 1; }
+          done
+          echo "Icon files in bundle:"; ls -la "$APPDIR"/AppIcon*.png
+
+          # Export the (re-signed) IPA. Resolve the installed profile's name from
+          # its decoded plist, then feed it to exportOptions. Search both the
+          # legacy MobileDevice path and the Xcode 16+ UserData path.
+          PROFILE=$(find "$HOME/Library" \( -name "*.mobileprovision" -o -name "*.provisionprofile" \) 2>/dev/null | head -1)
+          [ -n "$PROFILE" ] || { echo "no provisioning profile found on disk"; exit 1; }
+          echo "Found profile file: $PROFILE"
+          security cms -D -i "$PROFILE" > /tmp/profile.plist
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /tmp/profile.plist)
+          echo "Export profile: $PROFILE_NAME"
+          mkdir -p build/ios/ipa
+          plutil -create xml1 /tmp/exportOptions.plist
+          /usr/libexec/PlistBuddy \
+            -c "Add :method string app-store" \
+            -c "Add :signingStyle string manual" \
+            -c "Add :provisioningProfiles dict" \
+            -c "Add :provisioningProfiles:$BUNDLE_ID string $PROFILE_NAME" \
+            /tmp/exportOptions.plist
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath build/ios/ipa \
+            -exportOptionsPlist /tmp/exportOptions.plist \
+            -allowProvisioningUpdates
+          ls -la build/ios/ipa/
+
+          # ── SEAL TOP-LEVEL CFBundleIconName INTO THE EXPORTED IPA ────────────
+          # xcodebuild -exportArchive REGENERATES the app Info.plist and DROPS the
+          # top-level CFBundleIconName. ASC reads the TOP-LEVEL key, so re-inject
+          # into the EXPORTED .app, re-codesign, then re-zip the IPA.
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          [ -n "$IPA" ] || { echo "FATAL: no IPA produced"; exit 1; }
+          rm -rf /tmp/seal && mkdir -p /tmp/seal
+          unzip -q -o "$IPA" -d /tmp/seal
+          SAPP=$(find /tmp/seal/Payload -maxdepth 1 -name "*.app" | head -1)
+          [ -n "$SAPP" ] || { echo "FATAL: no .app inside exported IPA"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$SAPP/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Set :CFBundleIconName AppIcon" "$SAPP/Info.plist"
+          SIGNID=$(security find-identity -v -p codesigning | awk '/Apple Distribution|iPhone Distribution/{print $2; exit}')
+          [ -n "$SIGNID" ] || SIGNID=$(security find-identity -v -p codesigning | awk 'NR==1{print $2}')
+          echo "Re-signing with identity: $SIGNID"
+          security cms -D -i "$PROFILE" > /tmp/seal_profile.plist
+          /usr/libexec/PlistBuddy -x -c "Print :Entitlements" /tmp/seal_profile.plist > /tmp/seal_ent.plist 2>/dev/null || true
+          if [ -s /tmp/seal_ent.plist ]; then
+            codesign --force --sign "$SIGNID" --entitlements /tmp/seal_ent.plist "$SAPP"
+          else
+            codesign --force --sign "$SIGNID" "$SAPP"
+          fi
+          ( cd /tmp/seal && zip -qry /tmp/seal_out.ipa Payload )
+          cp -v /tmp/seal_out.ipa "$IPA"
+
+          # ── VERIFY ASC MARKETING ICON ON THE FINAL EXPORTED IPA ──────────────
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          unzip -q -o "$IPA" -d /tmp/verify
+          VAPP=$(find /tmp/verify/Payload -maxdepth 1 -name "*.app" | head -1)
+          ICONNAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$VAPP/Info.plist" 2>/dev/null || true)
+          echo "Top-level CFBundleIconName = '$ICONNAME'"
+          [ "$ICONNAME" = "AppIcon" ] || { echo "FATAL: top-level CFBundleIconName != AppIcon — ASC tile will be blank"; exit 1; }
+          [ -f "$VAPP/Assets.car" ] || { echo "FATAL: Assets.car missing from exported IPA"; exit 1; }
+          assetutil --info "$VAPP/Assets.car" | grep -i -A2 "AppIcon" || { echo "FATAL: no AppIcon in Assets.car"; exit 1; }
+          codesign --verify --deep --strict "$VAPP" && echo "codesign OK"
+          echo "ICON VERIFY PASSED: top-level CFBundleIconName=AppIcon + Assets.car carries AppIcon"
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
     publishing:
       app_store_connect:
-        auth: integration
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
