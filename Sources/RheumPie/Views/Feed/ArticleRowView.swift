@@ -9,17 +9,29 @@ struct ArticleRowView: View {
     let article: Article
     let isBookmarked: Bool
 
+    private var accent: Color { article.accentColor }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Colored accent bar — editorial identity marker
+            // Optional hero/cover image
+            if let cover = article.coverImageName, let ui = ImageStore.image(named: cover) {
+                Image(uiImage: ui)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: 140)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+            }
+
+            // Colored accent bar — editorial identity marker (per-post accent)
             Rectangle()
-                .fill(article.category.color)
+                .fill(accent)
                 .frame(height: Theme.Card.accentBarHeight)
 
             VStack(alignment: .leading, spacing: Theme.Spacing.small) {
                 // Top row: category badge + status icons
                 HStack(alignment: .center, spacing: Theme.Spacing.xsmall) {
-                    CategoryBadge(category: article.category)
+                    CategoryBadge(category: article.category, accent: accent)
                     Spacer()
                     if article.isUserAuthored {
                         Image(systemName: "pencil.circle.fill")
@@ -30,7 +42,7 @@ struct ArticleRowView: View {
                     if isBookmarked {
                         Image(systemName: "bookmark.fill")
                             .font(.caption)
-                            .foregroundStyle(article.category.color)
+                            .foregroundStyle(accent)
                             .accessibilityLabel("Bookmarked")
                     }
                 }

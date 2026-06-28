@@ -180,6 +180,93 @@ final class ArticleStoreTests: XCTestCase {
         XCTAssertEqual(store.articles.count, before)
     }
 
+    // MARK: - Backward-compatible model decoding
+
+    func testLegacyJSONDecodesWithDefaults() throws {
+        // JSON written by an earlier app version — no design-option fields.
+        let json = """
+        {"id":"legacy1","title":"Legacy","byline":"Dr","publishDate":"2025-01-01T00:00:00Z","category":"Lupus","summary":"s","body":"b","isUserAuthored":true}
+        """
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let a = try dec.decode(Article.self, from: Data(json.utf8))
+        XCTAssertEqual(a.titleStyle, .standard)
+        XCTAssertNil(a.coverImageName)
+        XCTAssertNil(a.accentColorHex)
+        XCTAssertTrue(a.imageAttachmentNames.isEmpty)
+        XCTAssertEqual(a.ownedImageNames, [])
+    }
+
+    func testNewFieldsRoundTripThroughCodable() throws {
+        let original = Article(
+            id: "r", title: "T", byline: "B",
+            publishDate: Date(timeIntervalSince1970: 1000),
+            category: .gout, summary: "s", body: "b", isUserAuthored: true,
+            coverImageName: "cover.jpg", accentColorHex: "#ABCDEF",
+            titleStyle: .rounded, imageAttachmentNames: ["x.png", "y.png"]
+        )
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let back = try dec.decode(Article.self, from: enc.encode(original))
+        XCTAssertEqual(original, back)
+        XCTAssertEqual(back.ownedImageNames, ["cover.jpg", "x.png", "y.png"])
+    }
+
+    func testCreatePostStoresDesignFields() {
+        let store = makeStoreWithStubArticles()
+        store.createPost(
+            title: "Art", category: .ra, summary: "s", body: "# H\n\nbody", byline: "Dr",
+            coverImageName: "c.jpg", accentColorHex: "#112233",
+            titleStyle: .serif, imageAttachmentNames: ["a.png"]
+        )
+        let post = store.articles.first
+        XCTAssertEqual(post?.coverImageName, "c.jpg")
+        XCTAssertEqual(post?.accentColorHex, "#112233")
+        XCTAssertEqual(post?.titleStyle, .serif)
+        XCTAssertEqual(post?.imageAttachmentNames, ["a.png"])
+    }
+
+    // MARK: - Markdown parsing + insertion helpers
+
+    func testMarkdownParserProducesExpectedBlocks() {
+        let md = "# Title\n\nIntro para.\n\n- one\n- two\n\n1. first\n2. second\n\n> a quote\n\n---\n\n![x](pic.png)"
+        let blocks = MarkdownParser.parse(md)
+        XCTAssertEqual(blocks.count, 7)
+        guard case .heading(1, "Title") = blocks[0] else { return XCTFail("block 0") }
+        guard case .paragraph = blocks[1] else { return XCTFail("block 1") }
+        guard case .bullets(let b) = blocks[2] else { return XCTFail("block 2") }
+        XCTAssertEqual(b, ["one", "two"])
+        guard case .numbered(let n) = blocks[3] else { return XCTFail("block 3") }
+        XCTAssertEqual(n, ["first", "second"])
+        guard case .quote(let q) = blocks[4] else { return XCTFail("block 4") }
+        XCTAssertEqual(q, "a quote")
+        guard case .divider = blocks[5] else { return XCTFail("block 5") }
+        guard case .image(let name, _) = blocks[6] else { return XCTFail("block 6") }
+        XCTAssertEqual(name, "pic.png")
+    }
+
+    func testWrapBoldAroundSelection() {
+        let (text, sel) = MDInsert.wrap("hello world", NSRange(location: 6, length: 5), marker: "**")
+        XCTAssertEqual(text, "hello **world**")
+        XCTAssertEqual(sel, NSRange(location: 8, length: 5))
+    }
+
+    func testHeadingPrefixReplacesExistingMarker() {
+        let (text, _) = MDInsert.transformLines("## old", NSRange(location: 0, length: 0)) { _, line in
+            "# " + MDInsert.stripMarkers(line)
+        }
+        XCTAssertEqual(text, "# old")
+    }
+
+    func testPlainTextStripsMarkdownForSpeech() {
+        let spoken = MarkdownParser.plainText("# Heading\n\n**Bold** and *italic*.\n\n![x](p.png)\n\n- item")
+        XCTAssertFalse(spoken.contains("#"))
+        XCTAssertFalse(spoken.contains("*"))
+        XCTAssertFalse(spoken.contains("p.png"))
+        XCTAssertTrue(spoken.contains("Bold"))
+        XCTAssertTrue(spoken.contains("item"))
+    }
+
     // MARK: - Helpers
 
     private func makeStoreWithStubArticles() -> ArticleStore {

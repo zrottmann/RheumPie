@@ -43,7 +43,17 @@ final class ArticleStore {
 
     // MARK: - Intent: user post authoring
 
-    func createPost(title: String, category: ArticleCategory, summary: String, body: String, byline: String) {
+    func createPost(
+        title: String,
+        category: ArticleCategory,
+        summary: String,
+        body: String,
+        byline: String,
+        coverImageName: String? = nil,
+        accentColorHex: String? = nil,
+        titleStyle: TitleStyle = .standard,
+        imageAttachmentNames: [String] = []
+    ) {
         let trimmedByline = byline.trimmingCharacters(in: .whitespaces)
         let article = Article(
             id: UUID().uuidString,
@@ -53,7 +63,11 @@ final class ArticleStore {
             category: category,
             summary: summary.trimmingCharacters(in: .whitespaces),
             body: body.trimmingCharacters(in: .whitespaces),
-            isUserAuthored: true
+            isUserAuthored: true,
+            coverImageName: coverImageName,
+            accentColorHex: accentColorHex,
+            titleStyle: titleStyle,
+            imageAttachmentNames: imageAttachmentNames
         )
         articles.insert(article, at: 0)
         persistUserPosts()
@@ -62,12 +76,16 @@ final class ArticleStore {
     func updatePost(_ updated: Article) {
         guard let idx = articles.firstIndex(where: { $0.id == updated.id }),
               articles[idx].isUserAuthored else { return }
+        // Remove image files the edit dropped (old owned minus new owned).
+        let removed = Set(articles[idx].ownedImageNames).subtracting(updated.ownedImageNames)
+        ImageStore.delete(names: Array(removed))
         articles[idx] = updated
         persistUserPosts()
     }
 
     func deletePost(_ article: Article) {
         guard article.isUserAuthored else { return }
+        ImageStore.delete(names: article.ownedImageNames)
         articles.removeAll { $0.id == article.id }
         bookmarkIDs.remove(article.id)
         persistBookmarks()

@@ -1,6 +1,11 @@
 import Foundation
 
 /// A single patient-education article authored by the rheumatologist.
+///
+/// `body` is treated as **Markdown** going forward (headings, lists, quotes,
+/// dividers, inline images, emphasis, links). The design-option fields below are
+/// all optional and decoded with `decodeIfPresent`, so the seeded articles and
+/// any posts written by earlier app versions keep decoding unchanged.
 struct Article: Identifiable, Codable, Equatable {
     let id: String
     let title: String
@@ -8,23 +13,41 @@ struct Article: Identifiable, Codable, Equatable {
     let publishDate: Date
     let category: ArticleCategory
     let summary: String
-    /// Full body text. Paragraphs separated by "\n\n".
+    /// Full body text, authored as Markdown. Paragraphs separated by "\n\n".
     let body: String
     /// True for posts created within the app by the rheumatologist.
     var isUserAuthored: Bool = false
 
+    // MARK: - Authoring design options (optional, backward-compatible)
+
+    /// Filename (in the app's Documents dir) of the article's hero/cover image.
+    var coverImageName: String? = nil
+    /// Per-post accent color as "#RRGGBB". When nil, the category color is used.
+    var accentColorHex: String? = nil
+    /// Title typography chosen by the author.
+    var titleStyle: TitleStyle = .standard
+    /// Filenames (Documents dir) of inline images + sketches the post owns.
+    var imageAttachmentNames: [String] = []
+
     /// Approximate reading time computed from body word count.
     var estimatedReadMinutes: Int {
-        let words = body.split(separator: " ").count
+        let words = body.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
         return max(1, Int((Double(words) / 200.0).rounded(.up)))
+    }
+
+    /// Every image file (Documents dir) this article owns — cover + attachments.
+    /// Used to clean up on edit/delete.
+    var ownedImageNames: [String] {
+        (coverImageName.map { [$0] } ?? []) + imageAttachmentNames
     }
 }
 
-// MARK: - Codable (custom to gracefully handle optional isUserAuthored in legacy JSON)
+// MARK: - Codable (custom to gracefully handle optional fields in legacy JSON)
 
 extension Article {
     private enum CodingKeys: String, CodingKey {
         case id, title, byline, publishDate, category, summary, body, isUserAuthored
+        case coverImageName, accentColorHex, titleStyle, imageAttachmentNames
     }
 
     init(from decoder: Decoder) throws {
@@ -37,6 +60,10 @@ extension Article {
         summary = try c.decode(String.self, forKey: .summary)
         body = try c.decode(String.self, forKey: .body)
         isUserAuthored = try c.decodeIfPresent(Bool.self, forKey: .isUserAuthored) ?? false
+        coverImageName = try c.decodeIfPresent(String.self, forKey: .coverImageName)
+        accentColorHex = try c.decodeIfPresent(String.self, forKey: .accentColorHex)
+        titleStyle = try c.decodeIfPresent(TitleStyle.self, forKey: .titleStyle) ?? .standard
+        imageAttachmentNames = try c.decodeIfPresent([String].self, forKey: .imageAttachmentNames) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -49,7 +76,22 @@ extension Article {
         try c.encode(summary, forKey: .summary)
         try c.encode(body, forKey: .body)
         try c.encode(isUserAuthored, forKey: .isUserAuthored)
+        try c.encodeIfPresent(coverImageName, forKey: .coverImageName)
+        try c.encodeIfPresent(accentColorHex, forKey: .accentColorHex)
+        try c.encode(titleStyle, forKey: .titleStyle)
+        try c.encode(imageAttachmentNames, forKey: .imageAttachmentNames)
     }
+}
+
+// MARK: - Title typography
+
+/// Curated title typography styles the author can pick per post.
+enum TitleStyle: String, Codable, CaseIterable, Identifiable {
+    case standard = "Default"
+    case serif = "Serif"
+    case rounded = "Rounded"
+
+    var id: String { rawValue }
 }
 
 // MARK: - Category
