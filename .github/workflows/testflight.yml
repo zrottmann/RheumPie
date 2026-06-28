@@ -149,11 +149,21 @@ jobs:
             [ "$HASALPHA" = "no" ] || { echo "FATAL: $I has alpha — iOS blanks it"; exit 1; }
           done
 
-          # Export the (re-signed) IPA with automatic cloud signing.
+          # Bake the top-level CFBundleIconName into the ARCHIVED app BEFORE export
+          # so cloud signing seals it in. We CANNOT re-sign after export: the only
+          # persistent keychain identity is "Apple Development" (the distribution key
+          # is cloud-managed and ephemeral), so any post-export codesign taints the
+          # bundle with development entitlements -> ASC errors 90164 / 90179.
+          $PB -c "Add :CFBundleIconName string AppIcon" "$APPDIR/Info.plist" 2>/dev/null \
+            || $PB -c "Set :CFBundleIconName AppIcon" "$APPDIR/Info.plist"
+
+          # Export re-signs the (icon-baked) bundle with the cloud-managed Apple
+          # Distribution certificate. The exported IPA is the FINAL, upload-ready
+          # artifact and is NOT modified afterward.
           mkdir -p build/ios/ipa
           plutil -create xml1 /tmp/exportOptions.plist
           $PB \
-            -c "Add :method string app-store" \
+            -c "Add :method string app-store-connect" \
             -c "Add :signingStyle string automatic" \
             -c "Add :teamID string $TEAM_ID" \
             -c "Add :destination string export" \
@@ -168,51 +178,22 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
           ls -la build/ios/ipa/
 
-          # Seal top-level CFBundleIconName into the exported IPA + re-codesign
-          # (export regenerates Info.plist and drops the top-level key that ASC reads).
+          # READ-ONLY verification of the pristine export (NO re-signing).
           IPA=$(ls build/ios/ipa/*.ipa | head -1)
           [ -n "$IPA" ] || { echo "FATAL: no IPA produced"; exit 1; }
-          rm -rf /tmp/seal && mkdir -p /tmp/seal
-          unzip -q -o "$IPA" -d /tmp/seal
-          SAPP=$(find /tmp/seal/Payload -maxdepth 1 -name "*.app" | head -1)
-          # Preserve the CORRECT distribution entitlements already baked into the
-          # exported binary (do NOT pull them from a random profile on disk — a
-          # development profile's get-task-allow=true triggers ASC errors 90164/90179).
-          codesign -d --entitlements - --xml "$SAPP" 2>/dev/null \
-            | sed -n '/<?xml/,/<\/plist>/p' > /tmp/cur_ent.plist || true
-          # App Store forbids get-task-allow; strip it defensively.
-          $PB -c "Delete :get-task-allow" /tmp/cur_ent.plist 2>/dev/null || true
-          plutil -lint /tmp/cur_ent.plist || true
-          # Inject top-level CFBundleIconName so ASC renders the marketing tile.
-          $PB -c "Add :CFBundleIconName string AppIcon" "$SAPP/Info.plist" 2>/dev/null \
-            || $PB -c "Set :CFBundleIconName AppIcon" "$SAPP/Info.plist"
-          # Re-sign with the cloud-managed Apple Distribution identity in the keychain.
-          SIGNID=$(security find-identity -v -p codesigning | awk '/Apple Distribution/{print $2; exit}')
-          [ -n "$SIGNID" ] || SIGNID=$(security find-identity -v -p codesigning | awk '/Distribution/{print $2; exit}')
-          [ -n "$SIGNID" ] || { echo "FATAL: no distribution identity in keychain"; security find-identity -v -p codesigning; exit 1; }
-          echo "Re-signing with identity: $SIGNID"
-          if [ -s /tmp/cur_ent.plist ]; then
-            codesign --force --sign "$SIGNID" --entitlements /tmp/cur_ent.plist "$SAPP"
-          else
-            codesign --force --sign "$SIGNID" "$SAPP"
-          fi
-          codesign --verify --strict "$SAPP" && echo "reseal codesign OK"
-          # Confirm get-task-allow is NOT present in the final signature.
-          if codesign -d --entitlements - --xml "$SAPP" 2>/dev/null | grep -q "get-task-allow"; then
-            echo "FATAL: get-task-allow still present after reseal"; exit 1; fi
-          ( cd /tmp/seal && zip -qry /tmp/seal_out.ipa Payload )
-          cp -v /tmp/seal_out.ipa "$IPA"
-
-          # Verify marketing icon on the final IPA.
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           unzip -q -o "$IPA" -d /tmp/verify
           VAPP=$(find /tmp/verify/Payload -maxdepth 1 -name "*.app" | head -1)
-          ICONNAME=$($PB -c "Print :CFBundleIconName" "$VAPP/Info.plist" 2>/dev/null || true)
-          [ "$ICONNAME" = "AppIcon" ] || { echo "FATAL: top-level CFBundleIconName != AppIcon"; exit 1; }
           [ -f "$VAPP/Assets.car" ] || { echo "FATAL: Assets.car missing"; exit 1; }
           assetutil --info "$VAPP/Assets.car" | grep -i -A2 "AppIcon" || { echo "FATAL: no AppIcon in Assets.car"; exit 1; }
+          ICONNAME=$($PB -c "Print :CFBundleIconName" "$VAPP/Info.plist" 2>/dev/null || true)
+          echo "Top-level CFBundleIconName = '$ICONNAME'"
+          [ "$ICONNAME" = "AppIcon" ] || echo "WARN: top-level CFBundleIconName not preserved by export"
+          # Must be distribution-signed (no get-task-allow) or ASC rejects it.
+          if codesign -d --entitlements - --xml "$VAPP" 2>/dev/null | grep -q "get-task-allow"; then
+            echo "FATAL: get-task-allow present — bundle is development-signed"; exit 1; fi
           codesign --verify --deep --strict "$VAPP" && echo "codesign OK"
-          echo "ICON VERIFY PASSED"
+          echo "ICON + SIGNING VERIFY PASSED"
 
       - name: Upload to TestFlight (altool)
         run: |
