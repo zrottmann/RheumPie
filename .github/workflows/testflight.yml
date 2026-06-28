@@ -1,0 +1,222 @@
+name: TestFlight (signed)
+
+# SIGNED App Store + TestFlight build using App Store Connect API-key CLOUD
+# signing — no manual .p12 cert is imported. xcodebuild -allowProvisioningUpdates
+# with the ASC API key creates/uses a cloud-managed Apple Distribution
+# certificate and the App Store provisioning profile automatically.
+#
+# The icon-baking logic (Assets.car via actool + loose AppIcon PNGs + top-level
+# CFBundleIconName) is ported verbatim from the proven codemagic.yaml recipe so
+# App Store upload accepts the build (errors 90022 / 90023 / 91111).
+#
+# Secrets required (set on the repo):
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_BASE64
+# Trigger: manual (workflow_dispatch) or push a tag tf-*
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ 'tf-*' ]
+
+jobs:
+  testflight:
+    runs-on: macos-26
+    env:
+      BUNDLE_ID: com.zrottmann.rheumpie
+      TEAM_ID: HFSDB879QM
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.5'
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun -sdk iphoneos --show-sdk-version)"
+
+      - name: Write ASC API key
+        env:
+          P8_B64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          # altool / xcodebuild discover the key by ID in these dirs.
+          mkdir -p "$PWD/private_keys" "$HOME/.appstoreconnect/private_keys" "$HOME/.private_keys"
+          echo "$P8_B64" | base64 --decode > "$PWD/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          cp "$PWD/private_keys/AuthKey_${ASC_KEY_ID}.p8" "$HOME/.appstoreconnect/private_keys/"
+          cp "$PWD/private_keys/AuthKey_${ASC_KEY_ID}.p8" "$HOME/.private_keys/"
+          # sanity: it's a PEM private key (do not print contents)
+          head -1 "$PWD/private_keys/AuthKey_${ASC_KEY_ID}.p8" | grep -q "BEGIN PRIVATE KEY" && echo "ASC key OK"
+
+      - name: Install xtool
+        run: brew install xtool-org/tap/xtool
+
+      - name: Generate Xcode project
+        run: |
+          xtool dev generate-xcode-project
+          ls -la
+
+      - name: Synthesize AppIcon asset catalog
+        run: |
+          # Repo ships only loose icon_1024.png. App Store upload requires a
+          # COMPILED asset catalog (Assets.car) carrying the 1024 marketing icon.
+          set -euxo pipefail
+          rm -rf Assets.xcassets
+          mkdir -p Assets.xcassets/AppIcon.appiconset
+          sips -s format png -z 1024 1024 icon_1024.png --out Assets.xcassets/AppIcon.appiconset/icon_1024.png
+          cat > Assets.xcassets/AppIcon.appiconset/Contents.json <<'EOF'
+          {
+            "images" : [
+              { "filename" : "icon_1024.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          EOF
+          cat > Assets.xcassets/Contents.json <<'EOF'
+          { "info" : { "author" : "xcode", "version" : 1 } }
+          EOF
+          ls -la Assets.xcassets/AppIcon.appiconset
+
+      - name: Archive (cloud signing), bake icons, export signed IPA
+        run: |
+          set -euxo pipefail
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/.build/*" | head -1)
+          [ -n "$PROJ" ] || { echo "no xcodeproj"; exit 1; }
+          SCHEMES=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f && NF{gsub(/^[[:space:]]+/,"");print}')
+          SCHEME=$(echo "$SCHEMES" | grep -iE -- '-App$|App$' | grep -iv 'Tests' | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -iv 'Tests' | head -1)
+          echo "Project: $PROJ / Scheme: $SCHEME"
+
+          KEYPATH="$PWD/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          ARCHIVE="$PWD/build/app.xcarchive"
+
+          # Cloud-managed automatic signing: xcodebuild creates/uses an Apple
+          # Distribution (cloud) cert + App Store profile via the ASC API key.
+          xcodebuild archive \
+            -project "$PROJ" -scheme "$SCHEME" -configuration Release \
+            -archivePath "$ARCHIVE" \
+            -destination 'generic/platform=iOS' \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEYPATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            SWIFT_VERSION=5.0
+
+          APPDIR=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" -type d | head -1)
+          [ -n "$APPDIR" ] || { echo "no .app in archive"; exit 1; }
+
+          # Compile the synthesized catalog and merge into the archived .app.
+          rm -rf /tmp/ac && mkdir -p /tmp/ac
+          actool Assets.xcassets \
+            --compile /tmp/ac \
+            --platform iphoneos \
+            --minimum-deployment-target 17.0 \
+            --target-device iphone --target-device ipad \
+            --app-icon AppIcon \
+            --output-partial-info-plist /tmp/ac/partial.plist \
+            --output-format human-readable-text
+          cp -v /tmp/ac/Assets.car "$APPDIR/Assets.car"
+          find /tmp/ac -maxdepth 1 -name "*.png" -exec cp -v {} "$APPDIR/" \;
+          PB=/usr/libexec/PlistBuddy
+          for KEY in CFBundleIcons "CFBundleIcons~ipad" CFBundleIconName CFBundleIconFiles; do
+            $PB -c "Delete :$KEY" "$APPDIR/Info.plist" 2>/dev/null || true
+          done
+          plutil -convert xml1 /tmp/ac/partial.plist
+          $PB -c "Merge /tmp/ac/partial.plist" "$APPDIR/Info.plist"
+
+          # Belt-and-suspenders loose iPhone/iPad icons (opaque RGB, no alpha).
+          sips -z 120 120 icon_1024.png --out "$APPDIR/AppIcon60x60@2x.png"
+          sips -z 180 180 icon_1024.png --out "$APPDIR/AppIcon60x60@3x.png"
+          sips -z 152 152 icon_1024.png --out "$APPDIR/AppIcon76x76@2x~ipad.png"
+          $PB -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$APPDIR/Info.plist" >/dev/null 2>&1 || \
+          $PB \
+            -c "Add :CFBundleIcons dict" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" \
+            -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string AppIcon" \
+            "$APPDIR/Info.plist"
+          [ -f "$APPDIR/AppIcon60x60@2x.png" ] && [ -f "$APPDIR/AppIcon60x60@3x.png" ] || {
+            echo "FATAL: AppIcon60x60@2x/@3x missing"; exit 1; }
+          for I in "$APPDIR/AppIcon60x60@2x.png" "$APPDIR/AppIcon60x60@3x.png"; do
+            HASALPHA=$(sips -g hasAlpha "$I" 2>/dev/null | awk '/hasAlpha/{print $2}')
+            [ "$HASALPHA" = "no" ] || { echo "FATAL: $I has alpha — iOS blanks it"; exit 1; }
+          done
+
+          # Export the (re-signed) IPA with automatic cloud signing.
+          mkdir -p build/ios/ipa
+          plutil -create xml1 /tmp/exportOptions.plist
+          $PB \
+            -c "Add :method string app-store" \
+            -c "Add :signingStyle string automatic" \
+            -c "Add :teamID string $TEAM_ID" \
+            -c "Add :destination string export" \
+            /tmp/exportOptions.plist
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath build/ios/ipa \
+            -exportOptionsPlist /tmp/exportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEYPATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          ls -la build/ios/ipa/
+
+          # Seal top-level CFBundleIconName into the exported IPA + re-codesign
+          # (export regenerates Info.plist and drops the top-level key that ASC reads).
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          [ -n "$IPA" ] || { echo "FATAL: no IPA produced"; exit 1; }
+          rm -rf /tmp/seal && mkdir -p /tmp/seal
+          unzip -q -o "$IPA" -d /tmp/seal
+          SAPP=$(find /tmp/seal/Payload -maxdepth 1 -name "*.app" | head -1)
+          $PB -c "Add :CFBundleIconName string AppIcon" "$SAPP/Info.plist" 2>/dev/null \
+            || $PB -c "Set :CFBundleIconName AppIcon" "$SAPP/Info.plist"
+          SIGNID=$(security find-identity -v -p codesigning | awk '/Apple Distribution|iPhone Distribution/{print $2; exit}')
+          [ -n "$SIGNID" ] || SIGNID=$(security find-identity -v -p codesigning | awk 'NR==1{print $2}')
+          echo "Re-signing with identity: $SIGNID"
+          PROFILE=$(find "$HOME/Library" \( -name "*.mobileprovision" -o -name "*.provisionprofile" \) 2>/dev/null | head -1)
+          if [ -n "$PROFILE" ]; then
+            security cms -D -i "$PROFILE" > /tmp/seal_profile.plist || true
+            $PB -x -c "Print :Entitlements" /tmp/seal_profile.plist > /tmp/seal_ent.plist 2>/dev/null || true
+          fi
+          if [ -s /tmp/seal_ent.plist ]; then
+            codesign --force --sign "$SIGNID" --entitlements /tmp/seal_ent.plist "$SAPP"
+          else
+            codesign --force --sign "$SIGNID" "$SAPP"
+          fi
+          ( cd /tmp/seal && zip -qry /tmp/seal_out.ipa Payload )
+          cp -v /tmp/seal_out.ipa "$IPA"
+
+          # Verify marketing icon on the final IPA.
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          unzip -q -o "$IPA" -d /tmp/verify
+          VAPP=$(find /tmp/verify/Payload -maxdepth 1 -name "*.app" | head -1)
+          ICONNAME=$($PB -c "Print :CFBundleIconName" "$VAPP/Info.plist" 2>/dev/null || true)
+          [ "$ICONNAME" = "AppIcon" ] || { echo "FATAL: top-level CFBundleIconName != AppIcon"; exit 1; }
+          [ -f "$VAPP/Assets.car" ] || { echo "FATAL: Assets.car missing"; exit 1; }
+          assetutil --info "$VAPP/Assets.car" | grep -i -A2 "AppIcon" || { echo "FATAL: no AppIcon in Assets.car"; exit 1; }
+          codesign --verify --deep --strict "$VAPP" && echo "codesign OK"
+          echo "ICON VERIFY PASSED"
+
+      - name: Upload to TestFlight (altool)
+        run: |
+          set -euxo pipefail
+          IPA=$(ls build/ios/ipa/*.ipa | head -1)
+          [ -n "$IPA" ] || { echo "FATAL: no IPA to upload"; exit 1; }
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "Upload submitted — build will appear in App Store Connect after processing."
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RheumPie-appstore-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: warn
