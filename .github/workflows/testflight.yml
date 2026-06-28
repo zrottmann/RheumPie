@@ -175,21 +175,31 @@ jobs:
           rm -rf /tmp/seal && mkdir -p /tmp/seal
           unzip -q -o "$IPA" -d /tmp/seal
           SAPP=$(find /tmp/seal/Payload -maxdepth 1 -name "*.app" | head -1)
+          # Preserve the CORRECT distribution entitlements already baked into the
+          # exported binary (do NOT pull them from a random profile on disk — a
+          # development profile's get-task-allow=true triggers ASC errors 90164/90179).
+          codesign -d --entitlements - --xml "$SAPP" 2>/dev/null \
+            | sed -n '/<?xml/,/<\/plist>/p' > /tmp/cur_ent.plist || true
+          # App Store forbids get-task-allow; strip it defensively.
+          $PB -c "Delete :get-task-allow" /tmp/cur_ent.plist 2>/dev/null || true
+          plutil -lint /tmp/cur_ent.plist || true
+          # Inject top-level CFBundleIconName so ASC renders the marketing tile.
           $PB -c "Add :CFBundleIconName string AppIcon" "$SAPP/Info.plist" 2>/dev/null \
             || $PB -c "Set :CFBundleIconName AppIcon" "$SAPP/Info.plist"
-          SIGNID=$(security find-identity -v -p codesigning | awk '/Apple Distribution|iPhone Distribution/{print $2; exit}')
-          [ -n "$SIGNID" ] || SIGNID=$(security find-identity -v -p codesigning | awk 'NR==1{print $2}')
+          # Re-sign with the cloud-managed Apple Distribution identity in the keychain.
+          SIGNID=$(security find-identity -v -p codesigning | awk '/Apple Distribution/{print $2; exit}')
+          [ -n "$SIGNID" ] || SIGNID=$(security find-identity -v -p codesigning | awk '/Distribution/{print $2; exit}')
+          [ -n "$SIGNID" ] || { echo "FATAL: no distribution identity in keychain"; security find-identity -v -p codesigning; exit 1; }
           echo "Re-signing with identity: $SIGNID"
-          PROFILE=$(find "$HOME/Library" \( -name "*.mobileprovision" -o -name "*.provisionprofile" \) 2>/dev/null | head -1)
-          if [ -n "$PROFILE" ]; then
-            security cms -D -i "$PROFILE" > /tmp/seal_profile.plist || true
-            $PB -x -c "Print :Entitlements" /tmp/seal_profile.plist > /tmp/seal_ent.plist 2>/dev/null || true
-          fi
-          if [ -s /tmp/seal_ent.plist ]; then
-            codesign --force --sign "$SIGNID" --entitlements /tmp/seal_ent.plist "$SAPP"
+          if [ -s /tmp/cur_ent.plist ]; then
+            codesign --force --sign "$SIGNID" --entitlements /tmp/cur_ent.plist "$SAPP"
           else
             codesign --force --sign "$SIGNID" "$SAPP"
           fi
+          codesign --verify --strict "$SAPP" && echo "reseal codesign OK"
+          # Confirm get-task-allow is NOT present in the final signature.
+          if codesign -d --entitlements - --xml "$SAPP" 2>/dev/null | grep -q "get-task-allow"; then
+            echo "FATAL: get-task-allow still present after reseal"; exit 1; fi
           ( cd /tmp/seal && zip -qry /tmp/seal_out.ipa Payload )
           cp -v /tmp/seal_out.ipa "$IPA"
 
