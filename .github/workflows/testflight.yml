@@ -221,9 +221,13 @@ jobs:
           ICONNAME=$($PB -c "Print :CFBundleIconName" "$VAPP/Info.plist" 2>/dev/null || true)
           echo "Top-level CFBundleIconName = '$ICONNAME'"
           [ "$ICONNAME" = "AppIcon" ] || echo "WARN: top-level CFBundleIconName not preserved by export"
-          # Must be distribution-signed (no get-task-allow) or ASC rejects it.
-          if codesign -d --entitlements - --xml "$VAPP" 2>/dev/null | grep -q "get-task-allow"; then
-            echo "FATAL: get-task-allow present — bundle is development-signed"; exit 1; fi
+          # Must be distribution-signed: get-task-allow must be false/absent, NOT
+          # merely present (an app-store build legitimately carries it set false).
+          GTA=$(codesign -d --entitlements - --xml "$VAPP" 2>/dev/null \
+                | plutil -extract get-task-allow raw - 2>/dev/null || echo absent)
+          echo "get-task-allow = $GTA"
+          if [ "$GTA" = "true" ]; then
+            echo "FATAL: development-signed (get-task-allow=true)"; exit 1; fi
           codesign --verify --deep --strict "$VAPP" && echo "codesign OK"
           echo "ICON + SIGNING VERIFY PASSED"
 
