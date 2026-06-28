@@ -130,4 +130,33 @@ enum ArticleCategory: String, Codable, CaseIterable, Identifiable {
         case .osteoarthritis: return "figure.strengthtraining.traditional"
         }
     }
+
+    /// Canonical on-disk short code — the form used by articles.json and the web
+    /// app. `rawValue` stays the full display name so UI that shows it is unaffected.
+    var code: String {
+        switch self {
+        case .general: return "general"
+        case .ra: return "ra"
+        case .lupus: return "lupus"
+        case .gout: return "gout"
+        case .psa: return "psa"
+        case .osteoarthritis: return "osteoarthritis"
+        }
+    }
+
+    // Custom Codable: decode the short code OR the legacy full display name (so the
+    // seed JSON and build 3/4 user posts both load); encode the canonical short code.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if let byCode = ArticleCategory.allCases.first(where: { $0.code == raw }) {
+            self = byCode
+        } else {
+            self = ArticleCategory(rawValue: raw) ?? .general
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(code)
+    }
 }

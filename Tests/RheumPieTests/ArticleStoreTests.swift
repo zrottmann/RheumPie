@@ -267,6 +267,51 @@ final class ArticleStoreTests: XCTestCase {
         XCTAssertTrue(spoken.contains("item"))
     }
 
+    // MARK: - Category encoding (short code <-> legacy full name)
+
+    func testShortCodeCategoryDecodes() throws {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let json = #"{"id":"x","title":"T","byline":"B","publishDate":"2025-01-01T00:00:00Z","category":"psa","summary":"s","body":"b"}"#
+        XCTAssertEqual(try dec.decode(Article.self, from: Data(json.utf8)).category, .psa)
+    }
+
+    func testLegacyFullNameCategoryDecodes() throws {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let json = #"{"id":"x","title":"T","byline":"B","publishDate":"2025-01-01T00:00:00Z","category":"Rheumatoid Arthritis","summary":"s","body":"b"}"#
+        XCTAssertEqual(try dec.decode(Article.self, from: Data(json.utf8)).category, .ra)
+    }
+
+    func testCategoryEncodesCanonicalShortCode() throws {
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        let s = String(data: try enc.encode(makeArticle(category: .osteoarthritis)), encoding: .utf8)!
+        XCTAssertTrue(s.contains("\"category\":\"osteoarthritis\""))
+        XCTAssertFalse(s.contains("Osteoarthritis"))  // full display name must not be persisted
+    }
+
+    func testRealBundledArticlesDecodeAllEight() throws {
+        // Decode the actual shipped seed (short category codes) from the source tree.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let json = root.appendingPathComponent("Sources/RheumPie/Resources/articles.json")
+        guard let data = try? Data(contentsOf: json) else { throw XCTSkip("articles.json not found at \(json.path)") }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let arts = try dec.decode([Article].self, from: data)
+        XCTAssertEqual(arts.count, 8, "All 8 seed articles must decode")
+        XCTAssertTrue(Set(arts.map(\.category)).isSuperset(of: [.ra, .lupus, .gout, .psa, .osteoarthritis]))
+    }
+
+    func testUserPostsSkipMalformedRecord() {
+        // One valid post + one missing the required "title" — the bad one must be
+        // skipped, not nuke the whole array.
+        let good = #"{"id":"u1","title":"Good","byline":"Dr","publishDate":"2025-01-01T00:00:00Z","category":"ra","summary":"s","body":"b","isUserAuthored":true}"#
+        let bad = #"{"id":"u2","byline":"Dr","publishDate":"2025-01-01T00:00:00Z","category":"ra","summary":"s","body":"b","isUserAuthored":true}"#
+        UserDefaults.standard.set(Data("[\(good),\(bad)]".utf8), forKey: "com.zrottmann.rheumpie.userPosts")
+        let store = ArticleStore()
+        store.load()
+        XCTAssertTrue(store.articles.contains { $0.id == "u1" })
+        XCTAssertFalse(store.articles.contains { $0.id == "u2" })
+    }
+
     // MARK: - Helpers
 
     private func makeStoreWithStubArticles() -> ArticleStore {

@@ -1,6 +1,15 @@
 import Foundation
 import Observation
 
+/// Decodes an array element-by-element, skipping any item that fails — so one
+/// malformed record can't nuke the whole list.
+private struct Lossy<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        value = try? decoder.singleValueContainer().decode(T.self)
+    }
+}
+
 /// Central store for articles, bookmarks, and user-authored posts.
 @MainActor
 @Observable
@@ -122,7 +131,7 @@ final class ArticleStore {
             let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode([Article].self, from: data)
+            return (try decoder.decode([Lossy<Article>].self, from: data)).compactMap(\.value)
         } catch {
             return []
         }
@@ -149,7 +158,7 @@ final class ArticleStore {
         guard let data = UserDefaults.standard.data(forKey: userPostsKey) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([Article].self, from: data)) ?? []
+        return ((try? decoder.decode([Lossy<Article>].self, from: data)) ?? []).compactMap(\.value)
     }
 
     private func persistUserPosts() {
